@@ -2,10 +2,14 @@ package mg.itu.utils;
 
 import java.io.File;
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
-import mg.itu.annotation.Controller;
+import mg.itu.annotation.*;
+import mg.itu.model.UrlMappingModel;
 
 import java.net.URL;
 
@@ -51,7 +55,58 @@ public class Utils {
         return listClasses;
     }
 
+    public static List<UrlMappingModel> getUrlMapping(String packageName) {
+        List<UrlMappingModel> listUrlMapping = new ArrayList<>();
+
+        try {
+
+            List<Class<?>> listClasses = getControllers(packageName);
+            for (Class<?> class1 : listClasses) {
+                List<Method> listMethods = List.of(class1.getMethods());
+                for (Method m : listMethods) {
+                    if (m.isAnnotationPresent(UrlMapping.class)) {
+                        UrlMappingModel map = new UrlMappingModel();
+                        map.setController(class1);
+                        map.setMethod(m);
+                        map.setUrl(m.getAnnotation(UrlMapping.class).url());
+                        listUrlMapping.add(map);
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        return listUrlMapping;
+    }
+
+    public static Map<String, UrlMappingModel> buildRoutingTable(String packageName) {
+
+        Map<String, UrlMappingModel> routes = new HashMap<>();
+
+        List<UrlMappingModel> mappings = getUrlMapping(packageName);
+
+        for (UrlMappingModel mapping : mappings) {
+
+            String url = mapping.getUrl();
+
+            if (routes.containsKey(url)) {
+                throw new RuntimeException(
+                        "Duplicate URL mapping detected : " + url);
+            }
+
+            routes.put(url, mapping);
+        }
+
+        return routes;
+    }
+
     public static List<Class<?>> scanPackage(String packageName) throws Exception {
+
+        if (packageName == null) {
+            throw new IllegalArgumentException("package name cannot be null. Check your configuration file");
+        }
 
         List<Class<?>> classes = new ArrayList<>();
 
@@ -61,7 +116,7 @@ public class Utils {
                 .getClassLoader()
                 .getResource(path);
 
-        System.out.println(resource);
+        // System.out.println(resource);
 
         if (resource == null) {
             return classes;
@@ -104,7 +159,6 @@ public class Utils {
         }
     }
 
-    /* */
     public static List<String> classesToString(List<Class<?>> list) {
         List<String> names = new ArrayList<>();
         for (Class<?> c : list) {
