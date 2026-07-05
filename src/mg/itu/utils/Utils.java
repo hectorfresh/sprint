@@ -10,6 +10,7 @@ import java.util.Map;
 
 import mg.itu.annotation.*;
 import mg.itu.model.UrlMappingModel;
+import mg.itu.model.UrlMethod;
 
 import java.net.URL;
 
@@ -55,51 +56,37 @@ public class Utils {
         return listClasses;
     }
 
-    public static List<UrlMappingModel> getUrlMapping(String packageName) {
-        List<UrlMappingModel> listUrlMapping = new ArrayList<>();
+    public static void buildRoutingTable(String packageName, Map<UrlMethod, UrlMappingModel> routes) {
 
-        try {
+        List<Class<?>> controllers = getControllers(packageName);
 
-            List<Class<?>> listClasses = getControllers(packageName);
-            for (Class<?> class1 : listClasses) {
-                List<Method> listMethods = List.of(class1.getMethods());
-                for (Method m : listMethods) {
-                    if (m.isAnnotationPresent(UrlMapping.class)) {
-                        UrlMappingModel map = new UrlMappingModel();
-                        map.setController(class1);
-                        map.setMethod(m);
-                        map.setUrl(m.getAnnotation(UrlMapping.class).url());
-                        listUrlMapping.add(map);
-                    }
+        for (Class<?> controller : controllers) {
+
+            for (Method method : controller.getMethods()) {
+
+                if (!method.isAnnotationPresent(UrlMapping.class)) {
+                    continue;
                 }
-            }
 
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+                String url = method.getAnnotation(UrlMapping.class).url();
+                String httpMethod = method.getAnnotation(UrlMapping.class).method().toUpperCase();
+
+                UrlMethod urlMethod = new UrlMethod(url, httpMethod);
+
+                UrlMappingModel mapping = new UrlMappingModel();
+                mapping.setController(controller);
+                mapping.setMethod(method);
+                mapping.setUrl(url);
+
+                if (routes.containsKey(urlMethod)) {
+                    throw new RuntimeException(
+                            "Duplicate URL and method mapping detected : " + url + " [" + httpMethod + "]");
+                }
+
+                routes.put(urlMethod, mapping);
+            }
         }
 
-        return listUrlMapping;
-    }
-
-    public static Map<String, UrlMappingModel> buildRoutingTable(String packageName) {
-
-        Map<String, UrlMappingModel> routes = new HashMap<>();
-
-        List<UrlMappingModel> mappings = getUrlMapping(packageName);
-
-        for (UrlMappingModel mapping : mappings) {
-
-            String url = mapping.getUrl();
-
-            if (routes.containsKey(url)) {
-                throw new RuntimeException(
-                        "Duplicate URL mapping detected : " + url);
-            }
-
-            routes.put(url, mapping);
-        }
-
-        return routes;
     }
 
     public static List<Class<?>> scanPackage(String packageName) throws Exception {
