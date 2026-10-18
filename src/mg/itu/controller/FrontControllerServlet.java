@@ -2,6 +2,7 @@ package mg.itu.controller;
 
 import mg.itu.utils.ParamBinder;
 import jakarta.servlet.*;
+import jakarta.servlet.annotation.MultipartConfig;
 import jakarta.servlet.http.*;
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -15,6 +16,12 @@ import java.lang.reflect.Method;
 import mg.itu.annotation.WebAPI;
 import mg.itu.utils.Json;
 
+/** Servlet frontal prenant en charge les requêtes normales et multipart/form-data. */
+@MultipartConfig(
+        fileSizeThreshold = 1024 * 1024,
+        maxFileSize = 20L * 1024 * 1024,
+        maxRequestSize = 25L * 1024 * 1024
+)
 public class FrontControllerServlet extends HttpServlet {
 
     private Map<UrlMethod, UrlMappingModel> routes;
@@ -23,18 +30,12 @@ public class FrontControllerServlet extends HttpServlet {
 
     @Override
     public void init() throws ServletException {
-        // Récupération de la table de routage depuis le contexte
         routes = (Map<UrlMethod, UrlMappingModel>) getServletContext().getAttribute("routes");
 
-        // Paramètres de configuration de la vue
         String initPrefix = getInitParameter("prefix");
-        if (initPrefix != null) {
-            this.prefix = initPrefix;
-        }
+        if (initPrefix != null) this.prefix = initPrefix;
         String initSuffix = getInitParameter("suffix");
-        if (initSuffix != null) {
-            this.suffix = initSuffix;
-        }
+        if (initSuffix != null) this.suffix = initSuffix;
     }
 
     private void processRequest(HttpServletRequest request, HttpServletResponse response)
@@ -43,87 +44,62 @@ public class FrontControllerServlet extends HttpServlet {
         String contextPath = request.getContextPath();
         String url = request.getRequestURI().substring(contextPath.length());
         String reqMethod = request.getMethod();
-
         UrlMethod urlMethod = new UrlMethod(url, reqMethod);
 
-        // Si une route correspond
-        if (routes.containsKey(urlMethod)) {
+        if (routes != null && routes.containsKey(urlMethod)) {
             UrlMappingModel mapping = routes.get(urlMethod);
-
             try {
                 Object controllerInstance = mapping.getController()
                         .getDeclaredConstructor().newInstance();
-
                 Method method = mapping.getMethod();
 
-                // =====================================================
-                // Détection d'un éventuel paramètre Model (où qu'il soit placé)
-                // =====================================================
                 Model model = null;
-                for (Class<?> pt : method.getParameterTypes()) {
-                    if (pt.equals(Model.class)) {
+                for (Class<?> parameterType : method.getParameterTypes()) {
+                    if (parameterType.equals(Model.class)) {
                         model = new Model();
                         break;
                     }
                 }
 
-                // =====================================================
-                // CAS 1 : méthode annotée @WebAPI → réponse JSON directe
-                // =====================================================
                 if (method.isAnnotationPresent(WebAPI.class)) {
-
                     WebAPI webApi = method.getAnnotation(WebAPI.class);
-
-                    // Binding automatique des paramètres (RequestParam, Model, ...)
                     Object[] args = ParamBinder.bind(method, request, model);
-
                     Object returnValue = method.invoke(controllerInstance, args);
 
                     response.setContentType("application/json;charset=UTF-8");
                     response.setCharacterEncoding("UTF-8");
                     PrintWriter out = response.getWriter();
-
                     if (webApi.alreadyJson()) {
-                        // Déjà du JSON → écrit tel quel
                         out.print(returnValue == null ? "null" : returnValue.toString());
                     } else if (returnValue instanceof String) {
-                        // String → pas de transformation (méthode 2)
                         out.print((String) returnValue);
                     } else {
-                        // Object / List / Map / ... → JSON (méthode 1)
                         out.print(Json.toJson(returnValue));
                     }
                     out.flush();
-                    return;   // ⚠️ pas de forward, on s'arrête ici
+                    return;
                 }
 
-                // =====================================================
-                // CAS 2 : comportement MVC classique (dispatch vers JSP)
-                // =====================================================
-
-                // Binding automatique des paramètres de la méthode
                 Object[] args = ParamBinder.bind(method, request, model);
-
                 Object returnValue = method.invoke(controllerInstance, args);
 
-                String viewName = null;
+                String viewName;
                 java.util.Map<String, Object> attributes = new java.util.HashMap<>();
 
                 if (returnValue instanceof ModelAndView) {
-                    ModelAndView mav = (ModelAndView) returnValue;
-                    viewName = mav.getViewName();
-                    attributes.putAll(mav.getAttributes());
+                    ModelAndView modelAndView = (ModelAndView) returnValue;
+                    viewName = modelAndView.getViewName();
+                    attributes.putAll(modelAndView.getAttributes());
                 } else if (returnValue instanceof String) {
                     viewName = (String) returnValue;
                 } else {
                     throw new ServletException(
-                        "Return type not supported: "
-                        + (returnValue == null ? "null" : returnValue.getClass().getName())
-                        + ". Expected String, ModelAndView, or @WebAPI.");
+                            "Return type not supported: "
+                            + (returnValue == null ? "null" : returnValue.getClass().getName())
+                            + ". Expected String, ModelAndView, or @WebAPI.");
                 }
 
                 if (model != null) attributes.putAll(model.getAttributes());
-
                 for (Map.Entry<String, Object> entry : attributes.entrySet()) {
                     request.setAttribute(entry.getKey(), entry.getValue());
                 }
@@ -134,17 +110,18 @@ public class FrontControllerServlet extends HttpServlet {
             } catch (Exception e) {
                 throw new ServletException("Error processing request for " + url, e);
             }
-
         } else {
-            // Aucune route trouvée → page de débogage (inchangée)
-            response.setContentType("text/html");
+            response.setContentType("text/html;charset=UTF-8");
             PrintWriter out = response.getWriter();
             out.println("<h2>No matching route found for: " + url + " [" + reqMethod + "]</h2>");
             out.println("<p>Available routes:</p><ul>");
-            for (UrlMethod key : routes.keySet()) {
-                UrlMappingModel map = routes.get(key);
-                out.println("<li>" + key.getUrl() + " [" + key.getMethod() + "] -> "
-                    + map.getController().getSimpleName() + "." + map.getMethod().getName() + "</li>");
+            if (routes != null) {
+                for (UrlMethod key : routes.keySet()) {
+                    UrlMappingModel map = routes.get(key);
+                    out.println("<li>" + key.getUrl() + " [" + key.getMethod() + "] -> "
+                            + map.getController().getSimpleName() + "."
+                            + map.getMethod().getName() + "</li>");
+                }
             }
             out.println("</ul>");
         }
