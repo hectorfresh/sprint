@@ -1,5 +1,5 @@
 package mg.itu.utils;
-
+import mg.itu.model.MySession;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.Part;
@@ -51,6 +51,12 @@ public final class ParamBinder {
 
             if (type.equals(Model.class)) {
                 args[i] = model;
+                continue;
+            }
+
+
+            if (type.equals(MySession.class)) {
+               args[i] = new MySession(request.getSession());
                 continue;
             }
 
