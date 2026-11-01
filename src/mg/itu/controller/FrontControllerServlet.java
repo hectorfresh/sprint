@@ -10,6 +10,7 @@ import java.util.Map;
 
 import mg.itu.annotation.Auth;
 import mg.itu.annotation.WebAPI;
+import mg.itu.exception.AuthException;
 import mg.itu.model.Model;
 import mg.itu.model.ModelAndView;
 import mg.itu.model.UrlMappingModel;
@@ -18,7 +19,7 @@ import mg.itu.utils.Json;
 
 import java.lang.reflect.Method;
 
-/** Servlet frontal prenant en charge les requêtes normales et multipart/form-data. */
+/** Servlet frontal : MVC, REST JSON, session, autorisation par rôles. */
 @MultipartConfig(
         fileSizeThreshold = 1024 * 1024,
         maxFileSize = 20L * 1024 * 1024,
@@ -30,8 +31,8 @@ public class FrontControllerServlet extends HttpServlet {
     private String prefix = "";
     private String suffix = ".jsp";
 
-    /** Sprint 10 : clé de session globale pour @Auth (configurée dans web.xml). */
     private String authSessionKey = null;
+    private String authSessionRolesKey = null;
 
     @Override
     public void init() throws ServletException {
@@ -42,10 +43,14 @@ public class FrontControllerServlet extends HttpServlet {
         String initSuffix = getInitParameter("suffix");
         if (initSuffix != null) this.suffix = initSuffix;
 
-        // Sprint 10 : nom de la clé de session à vérifier pour @Auth
         String key = getInitParameter("auth.session.key");
         if (key != null && !key.trim().isEmpty()) {
             this.authSessionKey = key.trim();
+        }
+
+        String rolesKey = getInitParameter("auth.session.roles.key");
+        if (rolesKey != null && !rolesKey.trim().isEmpty()) {
+            this.authSessionRolesKey = rolesKey.trim();
         }
     }
 
@@ -63,15 +68,17 @@ public class FrontControllerServlet extends HttpServlet {
                 Method method = mapping.getMethod();
 
                 // =====================================================
-                // Sprint 10 : contrôle d'autorisation (@Auth)
+                // Sprint 10 / 10 bis : contrôle d'autorisation (@Auth)
                 // =====================================================
                 Auth auth = method.getAnnotation(Auth.class);
                 if (auth == null) {
                     auth = mapping.getController().getAnnotation(Auth.class);
                 }
                 if (auth != null) {
+                    // ---- 1) Authentification ----
                     String key = auth.key().isEmpty() ? this.authSessionKey : auth.key();
                     if (key == null || key.isEmpty()) {
+                        // Erreur de configuration serveur → 500
                         throw new ServletException(
                                 "@Auth utilisé sur "
                                 + mapping.getController().getSimpleName() + "."
@@ -81,29 +88,57 @@ public class FrontControllerServlet extends HttpServlet {
                     HttpSession httpSession = request.getSession(false);
                     Object user = (httpSession == null) ? null : httpSession.getAttribute(key);
                     if (user == null) {
-                        throw new ServletException(
-                                "Accès refusé : la session ne contient pas la clé '"
-                                + key + "' (utilisateur non connecté)");
+                        // ⚡ Non connecté → 401
+                        throw AuthException.unauthorized(
+                                "Non authentifié : la session ne contient pas la clé '"
+                                + key + "'");
+                    }
+
+                    // ---- 2) Rôles ----
+                    String[] requiredRoles = auth.roles();
+                    if (requiredRoles.length > 0) {
+                        if (this.authSessionRolesKey == null || this.authSessionRolesKey.isEmpty()) {
+                            throw new ServletException(
+                                    "@Auth(roles=...) utilisé sur "
+                                    + mapping.getController().getSimpleName() + "."
+                                    + method.getName()
+                                    + " mais 'auth.session.roles.key' n'est pas configuré dans web.xml");
+                        }
+                        Object rolesValue = httpSession.getAttribute(this.authSessionRolesKey);
+                        java.util.Set<String> userRoles = extractRoles(rolesValue);
+
+                        boolean allowed = false;
+                        for (String r : requiredRoles) {
+                            if (r != null && userRoles.contains(r.trim())) {
+                                allowed = true;
+                                break;
+                            }
+                        }
+                        if (!allowed) {
+                            // ⚡ Connecté mais rôle manquant → 403
+                            throw AuthException.forbidden(
+                                    "Rôles insuffisants. Requis : "
+                                    + java.util.Arrays.toString(requiredRoles)
+                                    + ", rôles actuels : " + userRoles);
+                        }
                     }
                 }
+                // =====================================================
 
-                // =====================================================
-                // Instanciation du contrôleur
-                // =====================================================
+                // Instanciation
                 Object controllerInstance = mapping.getController()
                         .getDeclaredConstructor().newInstance();
 
-                // Détection d'un éventuel paramètre Model
                 Model model = null;
-                for (Class<?> parameterType : method.getParameterTypes()) {
-                    if (parameterType.equals(Model.class)) {
+                for (Class<?> pt : method.getParameterTypes()) {
+                    if (pt.equals(Model.class)) {
                         model = new Model();
                         break;
                     }
                 }
 
                 // =====================================================
-                // CAS 1 : @WebAPI → réponse JSON directe
+                // CAS 1 : @WebAPI → JSON
                 // =====================================================
                 if (method.isAnnotationPresent(WebAPI.class)) {
                     WebAPI webApi = method.getAnnotation(WebAPI.class);
@@ -125,7 +160,7 @@ public class FrontControllerServlet extends HttpServlet {
                 }
 
                 // =====================================================
-                // CAS 2 : MVC classique → forward JSP
+                // CAS 2 : MVC classique
                 // =====================================================
                 Object[] args = ParamBinder.bind(method, request, model);
                 Object returnValue = method.invoke(controllerInstance, args);
@@ -147,7 +182,8 @@ public class FrontControllerServlet extends HttpServlet {
                 }
 
                 if (viewName.startsWith("redirect:")) {
-                    response.sendRedirect(contextPath + viewName.substring("redirect:".length()));
+                    String target = viewName.substring("redirect:".length());
+                    response.sendRedirect(contextPath + target);
                     return;
                 }
 
@@ -159,6 +195,10 @@ public class FrontControllerServlet extends HttpServlet {
                 String fullPath = prefix + viewName + suffix;
                 request.getRequestDispatcher(fullPath).forward(request, response);
 
+            } catch (AuthException e) {
+                // ⚡ On répond avec le bon code HTTP, sans exposer de stack trace.
+                response.sendError(e.getStatusCode(), e.getMessage());
+                return;
             } catch (ServletException e) {
                 throw e;
             } catch (Exception e) {
@@ -179,6 +219,28 @@ public class FrontControllerServlet extends HttpServlet {
             }
             out.println("</ul>");
         }
+    }
+
+    private java.util.Set<String> extractRoles(Object value) {
+        java.util.Set<String> roles = new java.util.HashSet<>();
+        if (value == null) return roles;
+
+        if (value instanceof java.util.Collection) {
+            for (Object o : (java.util.Collection<?>) value) {
+                if (o != null) roles.add(o.toString().trim());
+            }
+        } else if (value.getClass().isArray()) {
+            int len = java.lang.reflect.Array.getLength(value);
+            for (int i = 0; i < len; i++) {
+                Object o = java.lang.reflect.Array.get(value, i);
+                if (o != null) roles.add(o.toString().trim());
+            }
+        } else {
+            for (String s : value.toString().split(",")) {
+                if (!s.trim().isEmpty()) roles.add(s.trim());
+            }
+        }
+        return roles;
     }
 
     @Override
