@@ -8,13 +8,15 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.Map;
 
+import mg.itu.annotation.Auth;
+import mg.itu.annotation.WebAPI;
 import mg.itu.model.Model;
 import mg.itu.model.ModelAndView;
 import mg.itu.model.UrlMappingModel;
 import mg.itu.model.UrlMethod;
-import java.lang.reflect.Method;
-import mg.itu.annotation.WebAPI;
 import mg.itu.utils.Json;
+
+import java.lang.reflect.Method;
 
 /** Servlet frontal prenant en charge les requêtes normales et multipart/form-data. */
 @MultipartConfig(
@@ -28,6 +30,9 @@ public class FrontControllerServlet extends HttpServlet {
     private String prefix = "";
     private String suffix = ".jsp";
 
+    /** Sprint 10 : clé de session globale pour @Auth (configurée dans web.xml). */
+    private String authSessionKey = null;
+
     @Override
     public void init() throws ServletException {
         routes = (Map<UrlMethod, UrlMappingModel>) getServletContext().getAttribute("routes");
@@ -36,6 +41,12 @@ public class FrontControllerServlet extends HttpServlet {
         if (initPrefix != null) this.prefix = initPrefix;
         String initSuffix = getInitParameter("suffix");
         if (initSuffix != null) this.suffix = initSuffix;
+
+        // Sprint 10 : nom de la clé de session à vérifier pour @Auth
+        String key = getInitParameter("auth.session.key");
+        if (key != null && !key.trim().isEmpty()) {
+            this.authSessionKey = key.trim();
+        }
     }
 
     private void processRequest(HttpServletRequest request, HttpServletResponse response)
@@ -49,10 +60,40 @@ public class FrontControllerServlet extends HttpServlet {
         if (routes != null && routes.containsKey(urlMethod)) {
             UrlMappingModel mapping = routes.get(urlMethod);
             try {
-                Object controllerInstance = mapping.getController()
-                        .getDeclaredConstructor().newInstance();
                 Method method = mapping.getMethod();
 
+                // =====================================================
+                // Sprint 10 : contrôle d'autorisation (@Auth)
+                // =====================================================
+                Auth auth = method.getAnnotation(Auth.class);
+                if (auth == null) {
+                    auth = mapping.getController().getAnnotation(Auth.class);
+                }
+                if (auth != null) {
+                    String key = auth.key().isEmpty() ? this.authSessionKey : auth.key();
+                    if (key == null || key.isEmpty()) {
+                        throw new ServletException(
+                                "@Auth utilisé sur "
+                                + mapping.getController().getSimpleName() + "."
+                                + method.getName()
+                                + " mais aucun 'auth.session.key' n'est configuré dans web.xml");
+                    }
+                    HttpSession httpSession = request.getSession(false);
+                    Object user = (httpSession == null) ? null : httpSession.getAttribute(key);
+                    if (user == null) {
+                        throw new ServletException(
+                                "Accès refusé : la session ne contient pas la clé '"
+                                + key + "' (utilisateur non connecté)");
+                    }
+                }
+
+                // =====================================================
+                // Instanciation du contrôleur
+                // =====================================================
+                Object controllerInstance = mapping.getController()
+                        .getDeclaredConstructor().newInstance();
+
+                // Détection d'un éventuel paramètre Model
                 Model model = null;
                 for (Class<?> parameterType : method.getParameterTypes()) {
                     if (parameterType.equals(Model.class)) {
@@ -61,6 +102,9 @@ public class FrontControllerServlet extends HttpServlet {
                     }
                 }
 
+                // =====================================================
+                // CAS 1 : @WebAPI → réponse JSON directe
+                // =====================================================
                 if (method.isAnnotationPresent(WebAPI.class)) {
                     WebAPI webApi = method.getAnnotation(WebAPI.class);
                     Object[] args = ParamBinder.bind(method, request, model);
@@ -80,6 +124,9 @@ public class FrontControllerServlet extends HttpServlet {
                     return;
                 }
 
+                // =====================================================
+                // CAS 2 : MVC classique → forward JSP
+                // =====================================================
                 Object[] args = ParamBinder.bind(method, request, model);
                 Object returnValue = method.invoke(controllerInstance, args);
 
@@ -99,6 +146,11 @@ public class FrontControllerServlet extends HttpServlet {
                             + ". Expected String, ModelAndView, or @WebAPI.");
                 }
 
+                if (viewName.startsWith("redirect:")) {
+                    response.sendRedirect(contextPath + viewName.substring("redirect:".length()));
+                    return;
+                }
+
                 if (model != null) attributes.putAll(model.getAttributes());
                 for (Map.Entry<String, Object> entry : attributes.entrySet()) {
                     request.setAttribute(entry.getKey(), entry.getValue());
@@ -107,6 +159,8 @@ public class FrontControllerServlet extends HttpServlet {
                 String fullPath = prefix + viewName + suffix;
                 request.getRequestDispatcher(fullPath).forward(request, response);
 
+            } catch (ServletException e) {
+                throw e;
             } catch (Exception e) {
                 throw new ServletException("Error processing request for " + url, e);
             }
