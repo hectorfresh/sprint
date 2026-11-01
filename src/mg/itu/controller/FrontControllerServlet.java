@@ -19,7 +19,7 @@ import mg.itu.utils.Json;
 
 import java.lang.reflect.Method;
 
-/** Servlet frontal : MVC, REST JSON, session, autorisation par rôles. */
+/** Servlet frontal : MVC, REST JSON, session, autorisation, contrôleurs singleton. */
 @MultipartConfig(
         fileSizeThreshold = 1024 * 1024,
         maxFileSize = 20L * 1024 * 1024,
@@ -28,15 +28,25 @@ import java.lang.reflect.Method;
 public class FrontControllerServlet extends HttpServlet {
 
     private Map<UrlMethod, UrlMappingModel> routes;
+    private Map<Class<?>, Object> controllers;   // Sprint 11
     private String prefix = "";
     private String suffix = ".jsp";
-
     private String authSessionKey = null;
     private String authSessionRolesKey = null;
 
     @Override
     public void init() throws ServletException {
         routes = (Map<UrlMethod, UrlMappingModel>) getServletContext().getAttribute("routes");
+        controllers = (Map<Class<?>, Object>) getServletContext().getAttribute("controllers");
+
+        if (routes == null) {
+            throw new ServletException(
+                    "Table de routage absente : vérifiez que FrameworkContextListener est déclaré dans web.xml");
+        }
+        if (controllers == null) {
+            throw new ServletException(
+                    "Map des contrôleurs absente : le listener n'a pas initialisé les singletons");
+        }
 
         String initPrefix = getInitParameter("prefix");
         if (initPrefix != null) this.prefix = initPrefix;
@@ -47,7 +57,6 @@ public class FrontControllerServlet extends HttpServlet {
         if (key != null && !key.trim().isEmpty()) {
             this.authSessionKey = key.trim();
         }
-
         String rolesKey = getInitParameter("auth.session.roles.key");
         if (rolesKey != null && !rolesKey.trim().isEmpty()) {
             this.authSessionRolesKey = rolesKey.trim();
@@ -62,23 +71,21 @@ public class FrontControllerServlet extends HttpServlet {
         String reqMethod = request.getMethod();
         UrlMethod urlMethod = new UrlMethod(url, reqMethod);
 
-        if (routes != null && routes.containsKey(urlMethod)) {
+        if (routes.containsKey(urlMethod)) {
             UrlMappingModel mapping = routes.get(urlMethod);
             try {
                 Method method = mapping.getMethod();
 
                 // =====================================================
-                // Sprint 10 / 10 bis : contrôle d'autorisation (@Auth)
+                // Contrôle d'autorisation (@Auth)
                 // =====================================================
                 Auth auth = method.getAnnotation(Auth.class);
                 if (auth == null) {
                     auth = mapping.getController().getAnnotation(Auth.class);
                 }
                 if (auth != null) {
-                    // ---- 1) Authentification ----
                     String key = auth.key().isEmpty() ? this.authSessionKey : auth.key();
                     if (key == null || key.isEmpty()) {
-                        // Erreur de configuration serveur → 500
                         throw new ServletException(
                                 "@Auth utilisé sur "
                                 + mapping.getController().getSimpleName() + "."
@@ -88,13 +95,11 @@ public class FrontControllerServlet extends HttpServlet {
                     HttpSession httpSession = request.getSession(false);
                     Object user = (httpSession == null) ? null : httpSession.getAttribute(key);
                     if (user == null) {
-                        // ⚡ Non connecté → 401
                         throw AuthException.unauthorized(
                                 "Non authentifié : la session ne contient pas la clé '"
                                 + key + "'");
                     }
 
-                    // ---- 2) Rôles ----
                     String[] requiredRoles = auth.roles();
                     if (requiredRoles.length > 0) {
                         if (this.authSessionRolesKey == null || this.authSessionRolesKey.isEmpty()) {
@@ -115,7 +120,6 @@ public class FrontControllerServlet extends HttpServlet {
                             }
                         }
                         if (!allowed) {
-                            // ⚡ Connecté mais rôle manquant → 403
                             throw AuthException.forbidden(
                                     "Rôles insuffisants. Requis : "
                                     + java.util.Arrays.toString(requiredRoles)
@@ -123,11 +127,15 @@ public class FrontControllerServlet extends HttpServlet {
                         }
                     }
                 }
-                // =====================================================
 
-                // Instanciation
-                Object controllerInstance = mapping.getController()
-                        .getDeclaredConstructor().newInstance();
+                // =====================================================
+                // Sprint 11 : récupérer le singleton (au lieu de newInstance)
+                // =====================================================
+                Object controllerInstance = controllers.get(mapping.getController());
+                if (controllerInstance == null) {
+                    throw new ServletException(
+                            "Contrôleur non instancié : " + mapping.getController().getName());
+                }
 
                 Model model = null;
                 for (Class<?> pt : method.getParameterTypes()) {
@@ -196,7 +204,6 @@ public class FrontControllerServlet extends HttpServlet {
                 request.getRequestDispatcher(fullPath).forward(request, response);
 
             } catch (AuthException e) {
-                // ⚡ On répond avec le bon code HTTP, sans exposer de stack trace.
                 response.sendError(e.getStatusCode(), e.getMessage());
                 return;
             } catch (ServletException e) {
@@ -209,13 +216,11 @@ public class FrontControllerServlet extends HttpServlet {
             PrintWriter out = response.getWriter();
             out.println("<h2>No matching route found for: " + url + " [" + reqMethod + "]</h2>");
             out.println("<p>Available routes:</p><ul>");
-            if (routes != null) {
-                for (UrlMethod key : routes.keySet()) {
-                    UrlMappingModel map = routes.get(key);
-                    out.println("<li>" + key.getUrl() + " [" + key.getMethod() + "] -> "
-                            + map.getController().getSimpleName() + "."
-                            + map.getMethod().getName() + "</li>");
-                }
+            for (UrlMethod key : routes.keySet()) {
+                UrlMappingModel map = routes.get(key);
+                out.println("<li>" + key.getUrl() + " [" + key.getMethod() + "] -> "
+                        + map.getController().getSimpleName() + "."
+                        + map.getMethod().getName() + "</li>");
             }
             out.println("</ul>");
         }
